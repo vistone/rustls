@@ -7,7 +7,11 @@ use std::vec;
 
 use pki_types::{CertificateDer, ServerName};
 
-use crate::client::{ClientConfig, ClientConnection, Resumption, Tls12Resumption};
+use crate::client::{
+    ClientConfig, ClientConnection, ClientHello, ClientHelloContext, ClientHelloCustomizer,
+    ExtensionType,
+    Resumption, Tls12Resumption,
+};
 use crate::crypto::cipher::{EncodedMessage, MessageEncrypter, Payload};
 use crate::crypto::kx::NamedGroup;
 use crate::crypto::tls13::OkmBlock;
@@ -679,6 +683,48 @@ fn hybrid_kx_component_share_not_offered_unless_supported_separately() {
         .unwrap();
     assert_eq!(key_shares.len(), 1);
     assert_eq!(key_shares[0].group, NamedGroup::X25519MLKEM768);
+}
+
+#[test]
+fn client_hello_extension_order_can_be_overridden() {
+    #[derive(Debug)]
+    struct FixedOrder {
+        order: Vec<ExtensionType>,
+    }
+
+    impl ClientHelloCustomizer for FixedOrder {
+        fn customize_client_hello(
+            &self,
+            _ctx: ClientHelloContext<'_>,
+            hello: &mut ClientHello<'_>,
+        ) -> Result<(), Error> {
+            hello.set_extension_encoding_order(self.order.clone())?;
+            Ok(())
+        }
+    }
+
+    for &provider in TEST_PROVIDERS {
+        // First: learn which extensions are used for this provider/config.
+        let base = ClientConfig::builder(Arc::new(tls13_only(provider.clone())))
+            .with_root_certificates(roots())
+            .with_no_client_auth()
+            .unwrap();
+        let base_ch = client_hello_sent_for_config(base).unwrap();
+        let mut used = base_ch.extensions.collect_used();
+
+        // Deterministic but obviously different order from rustls defaults.
+        used.sort_unstable_by_key(|e| u16::from(*e));
+        used.reverse();
+
+        let cfg = ClientConfig::builder(Arc::new(tls13_only(provider.clone())))
+            .with_root_certificates(roots())
+            .with_no_client_auth()
+            .unwrap()
+            .with_client_hello_customizer(Arc::new(FixedOrder { order: used.clone() }));
+
+        let ch = client_hello_sent_for_config(cfg).unwrap();
+        assert_eq!(ch.extensions.used_extensions_in_encoding_order(), used);
+    }
 }
 
 fn client_hello_sent_for_config(config: ClientConfig) -> Result<ClientHelloPayload, Error> {

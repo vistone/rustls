@@ -1,10 +1,13 @@
 use alloc::vec::Vec;
+use core::fmt;
 
 use crate::compress;
 use crate::crypto::{SelectedCredential, SignatureScheme};
 use crate::enums::CertificateType;
 use crate::log::{debug, trace};
-use crate::msgs::enums::ExtensionType;
+use pki_types::ServerName;
+
+pub use crate::msgs::enums::ExtensionType;
 use crate::msgs::handshake::{CertificateChain, ProtocolName, ServerExtensions};
 pub use crate::msgs::persist::{Tls12ClientSessionValue, Tls13ClientSessionValue};
 use crate::verify::DistinguishedName;
@@ -41,6 +44,63 @@ pub(crate) use tls12::TLS12_HANDLER;
 
 mod tls13;
 pub(crate) use tls13::TLS13_HANDLER;
+
+/// Context provided to a [`ClientHelloCustomizer`].
+#[derive(Clone, Copy, Debug)]
+pub struct ClientHelloContext<'a> {
+    /// The server name used for this connection.
+    pub server_name: &'a ServerName<'static>,
+
+    /// Whether this ClientHello is sent in response to a HelloRetryRequest (HRR).
+    pub is_retry: bool,
+}
+
+/// A mutable view over the ClientHello about to be encoded and sent.
+///
+/// This type intentionally exposes a narrow API surface so callers can influence fingerprinting
+/// relevant details (e.g. extension ordering) without coupling to rustls' internal message types.
+#[derive(Debug)]
+pub struct ClientHello<'a> {
+    inner: &'a mut crate::msgs::handshake::ClientHelloPayload,
+}
+
+impl<'a> ClientHello<'a> {
+    pub(crate) fn new(inner: &'a mut crate::msgs::handshake::ClientHelloPayload) -> Self {
+        Self { inner }
+    }
+}
+
+impl ClientHello<'_> {
+    /// Returns the extension encoding order that will be used when this ClientHello is encoded.
+    pub fn extension_encoding_order(&self) -> Vec<ExtensionType> {
+        self.inner.extension_encoding_order()
+    }
+
+    /// Override the order in which ClientHello extensions are encoded.
+    pub fn set_extension_encoding_order(
+        &mut self,
+        order: Vec<ExtensionType>,
+    ) -> Result<(), crate::Error> {
+        self.inner.set_extension_encoding_order(order)
+    }
+}
+
+/// Hook for customizing the encoded ClientHello without replacing rustls' record layer,
+/// key schedule, or certificate verification.
+///
+/// This is intended for "browser-like" fingerprinting use-cases where the caller needs
+/// to control details like extension ordering while preserving TLS security properties.
+pub trait ClientHelloCustomizer: fmt::Debug + Send + Sync {
+    /// Customize the ClientHello immediately before it is encoded and sent.
+    ///
+    /// Implementations must not violate TLS invariants. If customization would produce an
+    /// invalid or inconsistent ClientHello, return an error.
+    fn customize_client_hello(
+        &self,
+        ctx: ClientHelloContext<'_>,
+        hello: &mut ClientHello<'_>,
+    ) -> Result<(), crate::Error>;
+}
 
 /// Dangerous configuration that should be audited and used with extreme care.
 pub mod danger {

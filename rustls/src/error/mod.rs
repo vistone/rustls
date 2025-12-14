@@ -1423,6 +1423,13 @@ pub enum ApiMisuse {
     /// ECH attempted with a configuration that also supports TLS1.2.
     EchForbidsTls12Support,
 
+    /// A [`client::ClientHelloCustomizer`][crate::client::ClientHelloCustomizer] attempted to set
+    /// an invalid ClientHello extension encoding order.
+    ///
+    /// The order must match exactly the set of used extensions, contain no duplicates, and must
+    /// respect ordering constraints (e.g. `pre_shared_key` must be last).
+    ClientHelloExtensionEncodingOrderInvalid,
+
     /// Secret extraction operation attempted without opting-in to secret extraction.
     ///
     /// This is possible from:

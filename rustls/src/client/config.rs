@@ -7,6 +7,7 @@ use core::marker::PhantomData;
 use pki_types::{PrivateKeyDer, ServerName, UnixTime};
 
 use super::ech::EchMode;
+use super::ClientHelloCustomizer;
 #[cfg(feature = "std")]
 use super::handy::ClientSessionMemoryCache;
 use super::handy::{FailResolveClientCert, NoClientSessionStorage};
@@ -170,6 +171,12 @@ pub struct ClientConfig {
 
     /// How to offer Encrypted Client Hello (ECH). The default is to not offer ECH.
     pub(super) ech_mode: Option<EchMode>,
+
+    /// Optional hook to customize the encoded ClientHello immediately before sending.
+    ///
+    /// When set, this allows controlling aspects like extension encoding order while
+    /// still using rustls for record protection, key schedule, and verification.
+    pub client_hello_customizer: Option<Arc<dyn ClientHelloCustomizer>>,
 }
 
 impl ClientConfig {
@@ -210,6 +217,15 @@ impl ClientConfig {
     /// extra care.
     pub fn dangerous(&mut self) -> danger::DangerousClientConfig<'_> {
         danger::DangerousClientConfig { cfg: self }
+    }
+
+    /// Attach a [`ClientHelloCustomizer`] to this configuration.
+    pub fn with_client_hello_customizer(
+        mut self,
+        customizer: Arc<dyn ClientHelloCustomizer>,
+    ) -> Self {
+        self.client_hello_customizer = Some(customizer);
+        self
     }
 
     /// Return true if connections made with this `ClientConfig` will
@@ -761,6 +777,7 @@ impl ConfigBuilder<ClientConfig, WantsClientCert> {
             cert_compressors: compress::default_cert_compressors().to_vec(),
             cert_compression_cache: Arc::new(compress::CompressionCache::default()),
             ech_mode: self.state.client_ech_mode,
+            client_hello_customizer: None,
         })
     }
 }

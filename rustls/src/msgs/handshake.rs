@@ -927,6 +927,13 @@ extension_struct! {
         ExtensionType::EncryptedClientHelloOuterExtensions =>
             pub(crate) encrypted_client_hello_outer: Option<Vec<ExtensionType>>,
     } + {
+        /// Explicit extension encoding order override.
+        ///
+        /// If set, this order is used verbatim when encoding this ClientHello's extensions.
+        /// The order is validated when set to ensure it matches exactly the set of used
+        /// extensions and does not violate ordering constraints (e.g. PSK must be last).
+        pub(crate) encoding_order: Option<Vec<ExtensionType>>,
+
         /// Order randomization seed.
         pub(crate) order_seed: u16,
 
@@ -960,6 +967,7 @@ impl ClientExtensions<'_> {
             renegotiation_info,
             encrypted_client_hello,
             encrypted_client_hello_outer,
+            encoding_order,
             order_seed,
             contiguous_extensions,
         } = self;
@@ -986,12 +994,17 @@ impl ClientExtensions<'_> {
             renegotiation_info,
             encrypted_client_hello,
             encrypted_client_hello_outer,
+            encoding_order,
             order_seed,
             contiguous_extensions,
         }
     }
 
     pub(crate) fn used_extensions_in_encoding_order(&self) -> Vec<ExtensionType> {
+        if let Some(order) = &self.encoding_order {
+            return order.clone();
+        }
+
         let mut exts = self.order_insensitive_extensions_in_random_order();
         exts.extend(&self.contiguous_extensions);
 
@@ -1270,6 +1283,86 @@ pub(crate) struct ClientHelloPayload {
 }
 
 impl ClientHelloPayload {
+    /// Returns the extension encoding order that will be used when this payload is encoded.
+    ///
+    /// This reflects either the default rustls ordering logic (which may be randomized), or an
+    /// explicit override previously installed with [`Self::set_extension_encoding_order`].
+    pub(crate) fn extension_encoding_order(&self) -> Vec<ExtensionType> {
+        self.extensions.used_extensions_in_encoding_order()
+    }
+
+    /// Override the order in which ClientHello extensions are encoded.
+    ///
+    /// The provided `order` must:
+    ///
+    /// - Contain **each used extension exactly once** (no missing, extra, or duplicate entries).
+    /// - Keep `pre_shared_key` last when it is present (RFC8446).
+    /// - Keep `encrypted_client_hello_outer_extensions` before `encrypted_client_hello` when both
+    ///   are present.
+    ///
+    /// If these requirements are not met, an [`crate::Error`] is returned.
+    pub(crate) fn set_extension_encoding_order(
+        &mut self,
+        mut order: Vec<ExtensionType>,
+    ) -> Result<(), crate::Error> {
+        use crate::error::ApiMisuse;
+
+        let used = self.extensions.collect_used();
+
+        // Quick reject: duplicates in `order`.
+        {
+            let mut sorted = order.clone();
+            sorted.sort_unstable_by_key(|e| u16::from(*e));
+            if sorted
+                .windows(2)
+                .any(|w| w[0] == w[1])
+            {
+                return Err(ApiMisuse::ClientHelloExtensionEncodingOrderInvalid.into());
+            }
+        }
+
+        // Exact set match between `used` and `order`.
+        {
+            let mut used_sorted = used.clone();
+            used_sorted.sort_unstable_by_key(|e| u16::from(*e));
+
+            let mut order_sorted = order.clone();
+            order_sorted.sort_unstable_by_key(|e| u16::from(*e));
+
+            if used_sorted != order_sorted {
+                return Err(ApiMisuse::ClientHelloExtensionEncodingOrderInvalid.into());
+            }
+        }
+
+        // Enforce ordering constraints.
+        if self.preshared_key_offer.is_some() && order.last() != Some(&ExtensionType::PreSharedKey)
+        {
+            return Err(ApiMisuse::ClientHelloExtensionEncodingOrderInvalid.into());
+        }
+
+        let outer_idx = order
+            .iter()
+            .position(|e| *e == ExtensionType::EncryptedClientHelloOuterExtensions);
+        let ech_idx = order
+            .iter()
+            .position(|e| *e == ExtensionType::EncryptedClientHello);
+        if let (Some(outer), Some(ech)) = (outer_idx, ech_idx) {
+            if outer > ech {
+                return Err(ApiMisuse::ClientHelloExtensionEncodingOrderInvalid.into());
+            }
+        }
+
+        // The encoding order override should be stable regardless of any later mutations that
+        // only fill in values (eg, PSK binder), so keep it as provided.
+        self.extensions.encoding_order = Some({
+            // Normalize to ensure no accidental capacity abuse persists across clones.
+            order.shrink_to_fit();
+            order
+        });
+
+        Ok(())
+    }
+
     pub(crate) fn ech_inner_encoding(&self, to_compress: Vec<ExtensionType>) -> Vec<u8> {
         let mut bytes = Vec::new();
         self.payload_encode(&mut bytes, Encoding::EchInnerHello { to_compress });
