@@ -722,6 +722,15 @@ fn emit_client_hello_for_retry(
         _ => {}
     }
 
+    if let Some(customizer) = &config.client_hello_customizer {
+        let ctx = super::ClientHelloContext {
+            server_name: &input.session_key.server_name,
+            is_retry: retryreq.is_some(),
+        };
+        let mut hello = super::ClientHello::new(&mut chp_payload);
+        customizer.customize_client_hello(ctx, &mut hello)?;
+    }
+
     // Note what extensions we sent.
     input.hello.sent_extensions = chp_payload.collect_used();
 
